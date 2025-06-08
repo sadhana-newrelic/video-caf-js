@@ -1,16 +1,37 @@
 import * as nrvideo from 'newrelic-video-core'
 import { version } from '../package.json'
 import CAFAdsTracker from './ads'
+import NRHarvester from './harvester';
+import {DEFAULT_HARVEST_TIME, DEFAULT_BUFFER_SIZE} from './constants'
 
 export default class CAFTracker extends nrvideo.VideoTracker {
 
   /**
    * Constructor
    */
-  constructor () {
-    super()
-    this.reset()
-    this.registerListeners()
+  constructor(receiverContext, authCredentials) {
+    if (!receiverContext) {
+      nrvideo.Log.error('Receiver context is not initialized. Please ensure the cast receiverContext is properly set up.');
+    }
+    super(receiverContext.getPlayerManager());
+    this.receiverContext = receiverContext;
+    this.reset();
+    this.configureAuthentication(authCredentials);
+    this.initializeHarvester();
+  }
+
+  configureAuthentication(authCredentials) {
+    this.accountId = authCredentials.accountId;
+    this.licenseKey = authCredentials.applicationToken;
+    this.endpoint = authCredentials.endpoint;
+  }
+
+  initializeHarvester() {
+    this.nrHarvester = new NRHarvester(this.licenseKey, this.endpoint, {
+        harvestInterval: DEFAULT_HARVEST_TIME,
+        maxBufferSize: DEFAULT_BUFFER_SIZE,
+    });
+    this.updateRecordCustomEvent();
   }
 
   registerListeners() {
@@ -29,24 +50,51 @@ export default class CAFTracker extends nrvideo.VideoTracker {
     this.player.addEventListener(cast.framework.events.EventType.PLAYER_PRELOADING, event => { this.onPlayerPreloading(event) })
     this.player.addEventListener(cast.framework.events.EventType.PLAYER_PRELOADING_CANCELLED, event => { this.onPlayerPreloadingCancelled(event) })
     this.player.addEventListener(cast.framework.events.EventType.PLAYING, event => { this.onPlaying(event) })
-    this.player.addEventListener(cast.framework.events.EventType.REQUEST_SEEK, event => { this.onSeekStart(event) })
+    this.player.addEventListener(cast.framework.events.EventType.REQUEST_SEEK, event => { this.onRequestSeek(event) })
+    this.player.addEventListener(cast.framework.events.EventType.SEEKING, event => { this.onSeekStart(event) })
     this.player.addEventListener(cast.framework.events.EventType.SEEKED, event => { this.onSeekEnd(event) })
     this.player.addEventListener(cast.framework.events.EventType.ERROR, event => { this.onError(event) })
-    this.receiverContext.addEventListener(cast.framework.system.EventType.SHUTDOWN, event => { this.onShutdown(event)})
+    this.player.addEventListener(cast.framework.events.EventType.MEDIA_STATUS, event => { this.onMediaStatus(event) })
+    // cast.framework.system.EventType.SHUTDOWN has to be part of SYSTEM_METRICS. Commented this out for now 
+    // this.receiverContext.addEventListener(cast.framework.system.EventType.SHUTDOWN, event => { this.onShutdown(event)})
 
     /** DEBUG Events */
-    this.player.addEventListener(cast.framework.events.EventType.BITRATE_CHANGED, event => { this.onBitrateChanged(event) })
-    this.player.addEventListener(cast.framework.events.EventType.ENDED, event => { this.onEnded(event) })
-    this.player.addEventListener(cast.framework.events.EventType.PLAY, event => { this.onPlay(event) })
+    this.player.addEventListener(cast.framework.events.EventType.BITRATE_CHANGED, event => { this.onBitrateChanged(event) });
+    this.player.addEventListener(cast.framework.events.EventType.ENDED, event => { this.onEnded(event) });
+    this.player.addEventListener(cast.framework.events.EventType.PLAY, event => { this.onPlay(event) });
 
     if (!this.adsTracker) {
       this.setAdsTracker(new CAFAdsTracker(this.player))
     }
   }
 
+  unregisterListeners() {
+    this.player.removeEventListener(cast.framework.events.EventType.REQUEST_FOCUS_STATE, this.onRequestFocusState);
+    this.player.removeEventListener(cast.framework.events.EventType.REQUEST_LOAD, this.onRequestLoad);
+    this.player.removeEventListener(cast.framework.events.EventType.REQUEST_STOP, this.onRequestStop);
+    this.player.removeEventListener(cast.framework.events.EventType.REQUEST_PAUSE, this.onRequestPause);
+    this.player.removeEventListener(cast.framework.events.EventType.REQUEST_PLAY, this.onRequestPlay);
+    this.player.removeEventListener(cast.framework.events.EventType.REQUEST_PLAY_AGAIN, this.onRequestPlayAgain);
+    this.player.removeEventListener(cast.framework.events.EventType.BUFFERING, this.onBuffering);
+    this.player.removeEventListener(cast.framework.events.EventType.MEDIA_FINISHED, this.onMediaFinished);
+    this.player.removeEventListener(cast.framework.events.EventType.PAUSE, this.onPause);
+    this.player.removeEventListener(cast.framework.events.EventType.PLAYER_LOADING, this.onPlayerLoading);
+    this.player.removeEventListener(cast.framework.events.EventType.PLAYER_LOAD_COMPLETE, this.onPlayerLoadComplete);
+    this.player.removeEventListener(cast.framework.events.EventType.PLAYER_PRELOADING, this.onPlayerPreloading);
+    this.player.removeEventListener(cast.framework.events.EventType.PLAYER_PRELOADING_CANCELLED, this.onPlayerPreloadingCancelled);
+    this.player.removeEventListener(cast.framework.events.EventType.PLAYING, this.onPlaying);
+    this.player.removeEventListener(cast.framework.events.EventType.REQUEST_SEEK, this.onRequestSeek);
+    this.player.removeEventListener(cast.framework.events.EventType.SEEKING, this.onSeekStart);
+    this.player.removeEventListener(cast.framework.events.EventType.SEEKED, this.onSeekEnd);
+    this.player.removeEventListener(cast.framework.events.EventType.ERROR, this.onError);
+    this.player.removeEventListener(cast.framework.events.EventType.MEDIA_STATUS, this.onMediaStatus);
+    // this.receiverContext.removeEventListener(cast.framework.system.EventType.SHUTDOWN, this.onShutdown);
+    this.player.removeEventListener(cast.framework.events.EventType.BITRATE_CHANGED, this.onBitrateChanged);
+    this.player.removeEventListener(cast.framework.events.EventType.ENDED, this.onEnded);
+    this.player.removeEventListener(cast.framework.events.EventType.PLAY, this.onPlay);
+  }
+
   reset () {
-    this.receiverContext = cast.framework.CastReceiverContext.getInstance()
-    this.player = this.receiverContext.getPlayerManager()
     this._currentBitrate = 0
   }
 
@@ -68,6 +116,18 @@ export default class CAFTracker extends nrvideo.VideoTracker {
 
   getTrackerVersion () {
     return version
+  }
+
+  getInstrumentationProvider() {
+    return 'New Relic';
+  }
+
+  getInstrumentationName() {
+    return this.getPlayerName();
+  }
+
+  getInstrumentationVersion() {
+    return this.getPlayerVersion();
   }
 
   getVideoId () {
@@ -150,6 +210,10 @@ export default class CAFTracker extends nrvideo.VideoTracker {
     }
   }
 
+  getPlayerName() {
+    return 'caf'
+  }
+
   getPlayerVersion () {
     try {
       return cast.player.api.VERSION
@@ -161,7 +225,7 @@ export default class CAFTracker extends nrvideo.VideoTracker {
 
   isMuted () {
     try {
-      return this.receiverContext.getSystemVolume().muted
+      return this.mediaStatus.volume.muted
     }
     catch (e) {
       return null
@@ -187,72 +251,63 @@ export default class CAFTracker extends nrvideo.VideoTracker {
   /** CORE Events Listeners */
 
   onRequestFocusState (ev) {
-    nrvideo.Log.debug("onRequestFocusState = ", ev)
     this.sendPlayerReady()
   }
 
   onRequestLoad (ev) {
-    nrvideo.Log.debug("OnRequestLoad = ", ev)
+    // nrvideo.Log.debug("OnRequestLoad = ", ev)
   }
 
   onRequestStop (ev) {
-    nrvideo.Log.debug("OnRequestStop = ", ev)
+    // nrvideo.Log.debug("OnRequestStop = ", ev)
   }
 
   onRequestPause (ev) {
-    nrvideo.Log.debug("onRequestPause  = ", ev)
+    // nrvideo.Log.debug("onRequestPause  = ", ev)
   }
 
   onRequestPlay (ev) {
-    nrvideo.Log.debug("onRequestPlay  = ", ev)
     this.sendRequest()
   }
 
   onRequestPlayAgain (ev) {
-    nrvideo.Log.debug("onRequestPlayAgain  = ", ev)
+    // nrvideo.Log.debug("onRequestPlayAgain  = ", ev)
   }
 
   onBuffering (ev) {
-    nrvideo.Log.debug("onBuffering  = ", ev)
     if (ev.isBuffering) {
       if (this.adsTracker.state.isAdBreak) {
-        nrvideo.Log.debug("Ad buffer start")
         this.adsTracker.sendBufferStart();
       } else {
-        nrvideo.Log.debug("Buffer start")
         this.sendBufferStart()
       }
     }
     else {
       if (this.adsTracker.state.isAdBreak) {
-        nrvideo.Log.debug("Ad buffer end")
         this.adsTracker.sendBufferEnd();
       } else {
-        nrvideo.Log.debug("Buffer end")
         this.sendBufferEnd()
       }
     }
   }
 
   onMediaFinished (ev) {
-    nrvideo.Log.debug("onMediaFinished  = ", ev)
     this.sendEnd()
   }
 
   onPause (ev) {
-    nrvideo.Log.debug("onPause  = ", ev)
     if (!ev.ended) {
       this.sendPause()
     }
   }
 
   onPlayerLoading (ev) {
-    nrvideo.Log.debug("onPlayerLoading  = ", ev)
+    // nrvideo.Log.debug("onPlayerLoading  = ", ev)
     this.sendRequest()
   }
 
   onPlayerLoadComplete (ev) {
-    nrvideo.Log.debug("onPlayerLoadComplete  = ", ev)
+    // nrvideo.Log.debug("onPlayerLoadComplete  = ", ev)
   }
 
   onPlayerPreloading (ev) {
@@ -265,7 +320,6 @@ export default class CAFTracker extends nrvideo.VideoTracker {
 
   onPlaying (ev) {
     if (!this.adsTracker.state.isAdBreak) {
-      nrvideo.Log.debug("onPlaying  = ", ev);
       if (this.state.isPaused) {
         this.sendResume()
       } else {
@@ -274,41 +328,59 @@ export default class CAFTracker extends nrvideo.VideoTracker {
     }
   }
 
+  onRequestSeek (ev) {
+    // nrvideo.Log.debug("onRequestSeek  = ", ev)
+  }
+
   onSeekStart (ev) {
-    nrvideo.Log.debug("onSeekStart  = ", ev)
     this.sendSeekStart()
   }
 
   onSeekEnd (ev) {
-    nrvideo.Log.debug("onSeekEnd  = ", ev)
     this.sendSeekEnd()
   }
 
   onShutdown (ev) {
-    nrvideo.Log.debug("onShutdown  = ", ev)
     this.sendEnd()
     this.dispose()
   }
-  
+
   onError (ev) {
-    nrvideo.Log.debug("onError  = ", ev)
+    if (this.state._isAd || ev.detailedErrorCode === cast.framework.events.DetailedErrorCode.BREAK_CLIP_LOADING_ERROR || 
+        ev.detailedErrorCode === cast.framework.events.DetailedErrorCode.BREAK_SEEK_INTERCEPTOR_ERROR) {
+      this.adsTracker.sendError({errorCode: ev.detailedErrorCode, errorMessage: ev.reason})
+      return
+    }
     this.sendError({errorCode: ev.detailedErrorCode, errorMessage: ev.reason})
   }
 
   /** DEBUG Events Listeners */
 
   onBitrateChanged (ev) {
-    nrvideo.Log.debug("onBitrateChanged  = ", ev)
     this._currentBitrate = ev.totalBitrate
     this.sendRenditionChanged()
   }
 
   onEnded (ev) {
-    nrvideo.Log.debug("onEnded  = ", ev)
+    // nrvideo.Log.debug("onEnded  = ", ev)
   }
 
   onPlay (ev) {
-    nrvideo.Log.debug("onPlay  = ", ev)
+    // nrvideo.Log.debug("onPlay  = ", ev)
+  }
+
+  onMediaStatus (ev) {
+    this.mediaStatus = ev.mediaStatus
+  }
+
+  updateRecordCustomEvent() {
+    window.newrelic = window.newrelic || {};
+    window.newrelic.recordCustomEvent = async (eventType, attributes) => { 
+      await this.nrHarvester.addEventToBuffer(
+        eventType,
+        attributes
+      );
+    };
   }
 }
 
